@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+import json
+import requests
+import sys
+import os
+import argparse
+API_URL = 'https://api.scaleway.com/'
+VOLUME_PATH = 'instance/v1/zones/fr-par-1/volumes'
+SERVER_PATH = 'instance/v1/zones/fr-par-1/servers'
+RET_2XX = (200, 201, 202, 203, 204)
+
+
+def humanize(num):
+    for unit in ['b', 'kb', 'mb', 'gb', 'tb', 'pb', 'eb', 'zb']:
+        if abs(num) < 1000.0:
+            return "%3.1f%s" % (num, unit)
+        num /= 1000.0
+    return "%.1f%s" % (num, 'yb')
+
+
+def detach_volume(headers, volume_id, server_id):
+    r = requests.get(API_URL + SERVER_PATH + '/' + server_id, headers=headers)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong while getting server status")
+        print(json.dumps(r.json(), sort_keys=True,
+                         indent=4, separators=(',', ': ')))
+    else:
+        volumes = r.json()['server']['volumes']
+    new_volumes = {}
+    for slot in volumes.keys():
+        if volumes[slot]['id'] != volume_id:
+            new_volumes[slot] = volumes[slot]['id']
+    r = requests.patch(API_URL + SERVER_PATH + '/' + server_id,
+                       headers=headers, json={'volumes': new_volumes})
+    if r.status_code not in RET_2XX:
+        print("Something went wrong while getting server status")
+        print(json.dumps(r.json(), sort_keys=True,
+                         indent=4, separators=(',', ': ')))
+    else:
+        print(server_id)
+
+
+def attach_volume(headers, volume_id, server_id):
+    r = requests.get(API_URL + SERVER_PATH + '/' + server_id, headers=headers)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong while getting server status")
+        print(json.dumps(r.json(), sort_keys=True,
+                         indent=4, separators=(',', ': ')))
+    else:
+        volumes = r.json()['server']['volumes']
+    new_volumes = {}
+    for slot in volumes.keys():
+        new_volumes[slot] = volumes[slot]['id']
+    for i in range(0, 16):
+        if str(i) not in volumes.keys():
+            new_slot = str(i)
+            break
+    new_volumes[new_slot] = volume_id
+    r = requests.patch(API_URL + SERVER_PATH + '/' + server_id,
+                       headers=headers, json={'volumes': new_volumes})
+    if r.status_code not in RET_2XX:
+        print("Something went wrong while getting server status")
+        print(json.dumps(r.json(), sort_keys=True,
+              indent=4, separators=(',', ': ')))
+    else:
+        print(server_id)
+
+
+def list_volumes(headers, organization):
+    volumes = get_volumes(headers, organization)
+    for volume in volumes:
+        print(volume['id'] + '\t' + humanize(volume['size']) +
+              '\t' + volume['name'])
+
+
+def get_volumes(headers, organization):
+    params = {'per_page': 1,
+              'volume_type': 'b_ssd',
+              'organization': organization}
+    r = requests.get(API_URL + VOLUME_PATH, headers=headers, params=params)
+    total_count = int(r.headers['x-total-count'])
+    volumes = []
+    if total_count is 0:
+        return volumes
+    volume_left = total_count
+    page_number = 0
+    while volume_left > 0:
+        page_number = page_number + 1
+        params = {'per_page': 100,
+                  'volume_type': 'b_ssd',
+                  'organization': organization,
+                  'page': page_number}
+        r = requests.get(API_URL + VOLUME_PATH,
+                         headers=headers, params=params)
+        content = json.loads(r.content)
+        volume_left = volume_left - (len(content['volumes']))
+        volumes = volumes + content['volumes']
+    return volumes
+
+
+def create_volume(headers, organization, name, size):
+    data = {"name": name,
+            "size": int(size) * (1000 ** 3),
+            "organization": organization,
+            "volume_type": "b_ssd"}
+    r = requests.post(API_URL + VOLUME_PATH, headers=headers, json=data)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong : /")
+        print(json.dumps(r.json(), sort_keys=True,
+              indent=4, separators=(',', ': ')))
+        exit(2)
+    else:
+        print(r.json()['volume']['id'])
+
+
+def delete_volume(headers, volume_id):
+    r = requests.delete(API_URL + VOLUME_PATH + '/' + volume_id,
+                        headers=headers)
+    if r.status_code != 204:
+        print("Something went wrong : /")
+        exit(2)
+    print(volume_id)
+
+
+class BlkCli(object):
+
+    def __init__(self):
+        parser = argparse.ArgumentParser(description="Block volume quick cli",
+                                         usage='''
+blk_cli [-t|--token] [-o|--organization] <command> [<args>]
+
+Avaible commands:
+ create         Create a block volume
+ delete         Delete a block volume
+ attach         Attach a block volume to a server
+ detach         Detach a block volume from a server
+ list           List block volumes
+
+See 'blk_cli <command> -h' for further information.
+''')
+        parser.add_argument('-t', '--token', help="Your scaleway token",
+                            required=True)
+        parser.add_argument('-o', '--organization',
+                            help="Your scaleway organization",
+                            required=True)
+        parser.add_argument('command', help='Subcommand to run')
+        self.start_arg = 6
+        args = parser.parse_args(sys.argv[1:self.start_arg])
+        if not hasattr(self, args.command):
+            print('Unrecognized command "' + args.command + '"')
+            parser.print_help()
+            exit(1)
+        self.organization = args.organization
+        self.headers = {'X-Auth-Token': args.token,
+                        'Content-Type': 'application/json'}
+        getattr(self, args.command)()
+
+    def create(self):
+        parser = argparse.ArgumentParser(description='Create a block volume')
+        # prefixing the argument with -- means it's optional
+        parser.add_argument('-n', '--name',
+                            help='Name of the volume to create',
+                            required=True)
+        parser.add_argument('-s', '--size',
+                            help='Size of the volume, in GB',
+                            required=True)
+        args = parser.parse_args(sys.argv[self.start_arg:])
+        create_volume(self.headers, self.organization, args.name, args.size)
+
+    def delete(self):
+        parser = argparse.ArgumentParser(description='Delete a block volume')
+        # prefixing the argument with -- means it's optional
+        parser.add_argument('-i', '--volume-id',
+                            help='Id of the volume to delete',
+                            required=True)
+        args = parser.parse_args(sys.argv[self.start_arg:])
+        delete_volume(self.headers, args.volume_id)
+
+    def list(self):
+        list_volumes(self.headers, self.organization)
+
+    def attach(self):
+        parser = argparse.ArgumentParser(description='Attach block volume')
+        # prefixing the argument with -- means it's optional
+        parser.add_argument('-i', '--volume-id',
+                            help='Id of the volume to attach', required=True)
+        parser.add_argument('-s', '--server-id',
+                            help='Id of the server to attach the volum to',
+                            required=True)
+        args = parser.parse_args(sys.argv[self.start_arg:])
+        attach_volume(self.headers, args.volume_id, args.server_id)
+
+    def detach(self):
+        parser = argparse.ArgumentParser(description='Detach block volume')
+        # prefixing the argument with -- means it's optional
+        parser.add_argument('-i', '--volume-id',
+                            help='Id of the volume to attach',
+                            required=True)
+        parser.add_argument('-s', '--server-id',
+                            help='Id of the server to detach the volume from',
+                            required=True)
+        args = parser.parse_args(sys.argv[self.start_arg:])
+        detach_volume(self.headers, args.volume_id, args.server_id)
+
+
+if __name__ == '__main__':
+    BlkCli()
