@@ -78,6 +78,11 @@ def get_volumes(headers, organization):
               'volume_type': 'b_ssd',
               'organization': organization}
     r = requests.get(API_URL + VOLUME_PATH, headers=headers, params=params)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong : /")
+        print(json.dumps(r.json(), sort_keys=True,
+              indent=4, separators=(',', ': ')))
+        exit(2)
     total_count = int(r.headers['x-total-count'])
     volumes = []
     if total_count is 0:
