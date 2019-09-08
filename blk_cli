@@ -97,7 +97,7 @@ def get_volumes(headers, organization):
                   'page': page_number}
         r = requests.get(API_URL + VOLUME_PATH,
                          headers=headers, params=params)
-        content = json.loads(r.content)
+        content = json.loads(r.content.decode("utf-8"))
         volume_left = volume_left - (len(content['volumes']))
         volumes = volumes + content['volumes']
     return volumes
