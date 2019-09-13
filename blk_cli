@@ -63,7 +63,7 @@ def attach_volume(headers, volume_id, server_id):
         print(json.dumps(r.json(), sort_keys=True,
               indent=4, separators=(',', ': ')))
     else:
-        print(server_id)
+        return server_id
 
 
 def list_volumes(headers, organization):
@@ -115,16 +115,99 @@ def create_volume(headers, organization, name, size):
               indent=4, separators=(',', ': ')))
         exit(2)
     else:
-        print(r.json()['volume']['id'])
+        return r.json()['volume']['id']
 
 
 def delete_volume(headers, volume_id):
     r = requests.delete(API_URL + VOLUME_PATH + '/' + volume_id,
                         headers=headers)
-    if r.status_code != 204:
+    if r.status_code not in RET_2XX:
         print("Something went wrong : /")
         exit(2)
     print(volume_id)
+
+
+def get_default_image_id(headers, ctype):
+    images = get_all_images(headers)
+    for image in images:
+        if ctype.startswith('RENDER'):
+            if 'machine learning' not in \
+                    [cat.lower() for cat in image['categories']]:
+                continue
+            if image['name'].lower() == 'ubuntu bionic ml 10.1':
+                mkt_id, mkt_ver = image['id'], image['current_public_version']
+                break
+        else:
+            if 'distribution' not in \
+                    [cat.lower() for cat in image['categories']]:
+                continue
+            if image['name'].lower() == 'ubuntu bionic':
+                mkt_id, mkt_ver = image['id'], image['current_public_version']
+                break
+    base_url = 'https://api-marketplace.scaleway.com'
+    link = "/images/%s/versions/%s/local_images" % (mkt_id, mkt_ver)
+    r = requests.get(base_url + link, headers=headers)
+    local_images = r.json()['local_images']
+    while True:
+        if 'next' in r.links:
+            r = requests.get(base_url + r.links['next']['url'])
+            if r.status_code not in RET_2XX:
+                print("Something went wrong : /")
+                exit(2)
+            local_images = local_images + r.json()['local_images']
+        else:
+            break
+    for local_image in local_images:
+        if local_image['zone'] == 'par1' and local_image['arch'] == 'x86_64':
+            return local_image['id']
+
+
+def get_all_images(headers):
+    base_url = 'https://api-marketplace.scaleway.com'
+    r = requests.get(base_url + '/images', headers=headers)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong : /")
+        exit(2)
+    images = r.json()['images']
+    while True:
+        if 'next' in r.links:
+            r = requests.get(base_url + r.links['next']['url'])
+            if r.status_code not in RET_2XX:
+                print("Something went wrong : /")
+                exit(2)
+            images = images + r.json()['images']
+        else:
+            return images
+
+
+def spawn_server_with_block(headers, organization, s_name, ctype, img_id,
+                            v_size, v_name):
+    if not img_id:
+        img_id = get_default_image_id(headers, ctype)
+    data = {"name": s_name,
+            "commercial_type": ctype,
+            "image": img_id,
+            "organization": organization,
+            }
+    r = requests.post(API_URL + SERVER_PATH, headers=headers, json=data)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong : /")
+        print(json.dumps(r.json(), sort_keys=True,
+              indent=4, separators=(',', ': ')))
+        exit(2)
+    srv = r.json()
+    srv_id = srv['server']['id']
+    blk_id = create_volume(headers, organization, v_name, v_size)
+    attach_volume(headers, blk_id, srv_id)
+    data = {"action": "poweron"}
+    link = "%s/%s/action" % (SERVER_PATH, srv_id)
+    r = requests.post(API_URL + link, headers=headers, json=data)
+    if r.status_code not in RET_2XX:
+        print("Something went wrong : /")
+        print(json.dumps(r.json(), sort_keys=True,
+              indent=4, separators=(',', ': ')))
+        exit(2)
+    print(srv_id)
 
 
 class BlkCli(object):
@@ -139,6 +222,7 @@ Avaible commands:
  delete         Delete a block volume
  attach         Attach a block volume to a server
  detach         Detach a block volume from a server
+ spawn          Create a server with an attached block volume
  list           List block volumes
 
 See 'blk_cli <command> -h' for further information.
@@ -162,7 +246,6 @@ See 'blk_cli <command> -h' for further information.
 
     def create(self):
         parser = argparse.ArgumentParser(description='Create a block volume')
-        # prefixing the argument with -- means it's optional
         parser.add_argument('-n', '--name',
                             help='Name of the volume to create',
                             required=True)
@@ -170,11 +253,11 @@ See 'blk_cli <command> -h' for further information.
                             help='Size of the volume, in GB',
                             required=True)
         args = parser.parse_args(sys.argv[self.start_arg:])
-        create_volume(self.headers, self.organization, args.name, args.size)
+        print(create_volume(self.headers, self.organization,
+                            args.name, args.size))
 
     def delete(self):
         parser = argparse.ArgumentParser(description='Delete a block volume')
-        # prefixing the argument with -- means it's optional
         parser.add_argument('-i', '--volume-id',
                             help='Id of the volume to delete',
                             required=True)
@@ -186,26 +269,51 @@ See 'blk_cli <command> -h' for further information.
 
     def attach(self):
         parser = argparse.ArgumentParser(description='Attach block volume')
-        # prefixing the argument with -- means it's optional
         parser.add_argument('-i', '--volume-id',
                             help='Id of the volume to attach', required=True)
         parser.add_argument('-s', '--server-id',
                             help='Id of the server to attach the volum to',
                             required=True)
         args = parser.parse_args(sys.argv[self.start_arg:])
-        attach_volume(self.headers, args.volume_id, args.server_id)
+        print(attach_volume(self.headers, args.volume_id, args.server_id))
 
     def detach(self):
         parser = argparse.ArgumentParser(description='Detach block volume')
-        # prefixing the argument with -- means it's optional
         parser.add_argument('-i', '--volume-id',
-                            help='Id of the volume to attach',
+                            help='Id of the volume to detach',
                             required=True)
         parser.add_argument('-s', '--server-id',
                             help='Id of the server to detach the volume from',
                             required=True)
         args = parser.parse_args(sys.argv[self.start_arg:])
         detach_volume(self.headers, args.volume_id, args.server_id)
+
+    def spawn(self):
+        parser = argparse.ArgumentParser(description='Spawn an instance '
+                                                     'with an attached '
+                                                     'block volume.')
+        parser.add_argument('-n', '--server-name',
+                            help='Name of the server to create',
+                            required=True)
+        parser.add_argument('-c', '--commercial-type',
+                            help='Commercial type of the server to create '
+                                 'Can be DEV1-*, GP1-*, RENDER-*.',
+                            required=True)
+        parser.add_argument('-i', '--image',
+                            help='Image id to use to create the server, '
+                                 'default to "ubuntu bionic" or "Ubuntu '
+                                 'Bionic ML 10.1" for RENDER instances.',
+                            default=None)
+        parser.add_argument('-s', '--size',
+                            help='Size of the volume, in GB',
+                            required=True)
+        parser.add_argument('-b', '--block-name',
+                            help='Name of the block volume',
+                            required=True)
+        args = parser.parse_args(sys.argv[self.start_arg:])
+        spawn_server_with_block(self.headers, self.organization,
+                                args.server_name, args.commercial_type,
+                                args.image, args.size, args.block_name)
 
 
 if __name__ == '__main__':
